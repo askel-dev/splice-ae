@@ -2,6 +2,10 @@
 
 **Claude Code, docked inside Adobe After Effects.**
 
+![Splice putting markers on every beat of a song in After Effects](docs/demo.gif)
+
+<sub>"Put markers on the beats of the selected song": Claude reads the audio, tracks the beat and adds 121 markers in one undo step (sped up in the middle).</sub>
+
 Splice adds a chat panel to After Effects that runs [Claude Code](https://claude.com/claude-code) on your own subscription. Claude sees the comp you're in and the layers you've selected, and edits the project directly through 44 tools: cutting to scene changes, placing markers on the beat, applying effects, writing expressions. Every change is one undo step.
 
 > Unofficial community project. Not affiliated with or endorsed by Anthropic or Adobe.
@@ -11,7 +15,7 @@ Splice adds a chat panel to After Effects that runs [Claude Code](https://claude
 - **Chat in a docked panel** (Window > Extensions > Splice). Replies stream in, tool calls show up inline, and you approve anything outside the After Effects tools.
 - **Knows what you mean by "these".** Each message carries a snapshot of the active comp, playhead and selected layers, so "make these fade in" works.
 - **Can look at your comp.** Attach the current frame as an image with one click.
-- **Built for editing, not just motion graphics.** Scene-cut detection, cutting and packing clips, beat markers from the audio waveform, browsing and previewing media on disk before importing it.
+- **Built for editing, not just motion graphics.** Beat tracking for MP3, AAC, WAV and more, scene-cut detection, cutting and packing clips, browsing and previewing media on disk before importing it.
 - **Fast.** A hidden bridge inside After Effects receives commands over localhost, so a tool call takes milliseconds instead of a file-polling round trip.
 - **Safe by default.** Every write is a single undo step. ExtendScript that Claude writes always shows up in an Allow card before it runs.
 - **No API key.** It uses your existing Claude Code login, so there are no per-request charges on top of your plan.
