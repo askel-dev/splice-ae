@@ -38,12 +38,17 @@
     return asciiEscape(JSON.stringify(String(value)));
   }
 
+  // Reload a script when its file changes, so updates apply without restarting After Effects
+  var loadedVersions = {};
+
   function loadJsx(fileName, probeFunction) {
+    var file = path.join(extensionPath(), 'jsx', fileName);
+    var version = '';
+    try { version = String(fs.statSync(file).mtimeMs); } catch (e) {}
     return evalScript('typeof ' + probeFunction).then(function (type) {
-      if (type === 'function') {
+      if (type === 'function' && loadedVersions[fileName] === version) {
         return;
       }
-      var file = path.join(extensionPath(), 'jsx', fileName);
       var source = (fileName === 'mcp-bridge-auto.jsx' ? 'MCP_HEADLESS = true; ' : '') +
         'try { $.evalFile(new File(' + jsxString(file) + ')); "ok"; } ' +
         'catch (e) { "ERR " + e.toString() + " (line " + e.line + ")"; }';
@@ -51,6 +56,7 @@
         if (result !== 'ok') {
           throw new Error('Could not load ' + fileName + ': ' + result);
         }
+        loadedVersions[fileName] = version;
       });
     });
   }

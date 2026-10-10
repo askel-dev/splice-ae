@@ -1644,21 +1644,26 @@ function addMarkersFromArray(args) {
         }
 
         var markerType = params.markerType || "layer";
+        var fromSource = params.timeBase === "source";
         var layer = null;
 
-        if (markerType === "layer") {
-            if (params.layerIndex !== undefined && params.layerIndex !== null) {
-                layer = comp.layer(params.layerIndex);
-                if (!layer) { throw new Error("Layer not found at index " + params.layerIndex); }
-            } else if (params.layerName) {
-                for (var i = 1; i <= comp.numLayers; i++) {
-                    if (comp.layer(i).name === params.layerName) { layer = comp.layer(i); break; }
-                }
-                if (!layer) { throw new Error("Layer not found with name '" + params.layerName + "'."); }
-            } else {
-                throw new Error("Provide layerIndex or layerName for layer markers, or set markerType to 'comp'.");
+        if (params.layerIndex !== undefined && params.layerIndex !== null) {
+            layer = comp.layer(params.layerIndex);
+            if (!layer) { throw new Error("Layer not found at index " + params.layerIndex); }
+        } else if (params.layerName) {
+            for (var i = 1; i <= comp.numLayers; i++) {
+                if (comp.layer(i).name === params.layerName) { layer = comp.layer(i); break; }
             }
+            if (!layer) { throw new Error("Layer not found with name '" + params.layerName + "'."); }
+        } else if (markerType === "layer" || fromSource) {
+            throw new Error("Provide layerIndex or layerName" + (fromSource ? " (timeBase 'source' converts from that layer's source time)." : " for layer markers, or set markerType to 'comp'."));
         }
+
+        // Source time (e.g. seconds into the song file) to comp time, honoring time stretch
+        var stretch = layer ? layer.stretch / 100 : 1;
+        var layerStart = Math.min(layer ? layer.inPoint : 0, layer ? layer.outPoint : 0);
+        var layerEnd = Math.max(layer ? layer.inPoint : 0, layer ? layer.outPoint : 0);
+        var skipped = 0;
 
         var added = [];
         var errors = [];
@@ -1667,6 +1672,11 @@ function addMarkersFromArray(args) {
             try {
                 var spec = markers[j];
                 var timeInSeconds = Number(spec.timeInSeconds);
+                if (fromSource) {
+                    timeInSeconds = layer.startTime + timeInSeconds * stretch;
+                    // Only the part of the source that is actually visible in the comp
+                    if (timeInSeconds < layerStart - 1e-6 || timeInSeconds > layerEnd + 1e-6) { skipped++; continue; }
+                }
                 var mv = new MarkerValue(spec.comment || "");
                 mv.duration = (spec.duration !== undefined && spec.duration !== null) ? Number(spec.duration) : 0;
                 if (spec.chapter)  { mv.chapter = spec.chapter; }
@@ -1689,6 +1699,7 @@ function addMarkersFromArray(args) {
             message: "Bulk marker insertion complete",
             addedCount: added.length,
             errorCount: errors.length,
+            skippedOutsideLayer: skipped,
             added: added,
             errors: errors,
             composition: { name: comp.name, index: compIndex },

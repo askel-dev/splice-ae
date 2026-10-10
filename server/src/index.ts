@@ -1395,9 +1395,9 @@ server.tool(
 
 server.tool(
   "analyze-audio-waveform",
-  "Analyze a WAV audio file to extract waveform amplitude data and detect peaks/transients. First call get-audio-info to retrieve the sourceFilePath, then pass it here. Returns normalized amplitude values (0-1) at evenly spaced time intervals plus an array of peak times where transients are detected.",
+  "Analyze an audio file (WAV, MP3, AAC, M4A, AIFF; also the audio track of a video) to extract waveform amplitude data, detect peaks/transients, and track the beat. For markers on the beat or cutting to the music, use beatTimes (with bpm); peakTimes are only the loudest hits. First call get-audio-info to retrieve the sourceFilePath, then pass it here. Times are in file time, not comp time. Returns normalized amplitude values (0-1) at evenly spaced time intervals plus an array of peak times where transients are detected.",
   {
-    filePath: z.string().describe("Absolute path to the WAV audio file (obtained from get-audio-info sourceFilePath)."),
+    filePath: z.string().describe("Absolute path to the audio file (obtained from get-audio-info sourceFilePath)."),
     numPoints: z.number().int().positive().optional().describe("Number of amplitude samples to return (default: 200). Higher = more detail."),
   },
   async ({ filePath, numPoints = 200 }) => {
@@ -1405,9 +1405,10 @@ server.tool(
       if (!fs.existsSync(filePath)) {
         return { content: [{ type: "text", text: JSON.stringify({ status: "error", message: `File not found: ${filePath}` }) }], isError: true };
       }
-      const result = analyzeWavAmplitudes(filePath, numPoints);
+      const result = analyzeWavAmplitudes(await decodeToWav(filePath), numPoints);
+      const beats = process.platform === "darwin" ? await detectBeats(filePath) : null;
       if (!result) {
-        return { content: [{ type: "text", text: JSON.stringify({ status: "error", message: "Could not parse audio file. Only uncompressed PCM WAV files are supported. For other formats, convert to WAV first." }) }], isError: true };
+        return { content: [{ type: "text", text: JSON.stringify({ status: "error", message: "Could not decode this audio file." }) }], isError: true };
       }
       return {
         content: [{ type: "text", text: JSON.stringify({
@@ -1419,6 +1420,7 @@ server.tool(
           numPoints: numPoints,
           peakCount: result.peakTimes.length,
           peakTimes: result.peakTimes,
+          ...(beats ? { bpm: beats.bpm, beatCount: beats.beatTimes.length, beatTimes: beats.beatTimes } : {}),
           waveformPoints: result.waveformPoints
         }, null, 2) }]
       };
@@ -1430,13 +1432,14 @@ server.tool(
 
 server.tool(
   "add-markers-bulk",
-  "Add multiple layer or composition markers at once. Use this after analyze-audio-waveform to place markers at detected peaks, or to add any set of markers in a single call.",
+  "Add multiple layer or composition markers at once. Use this after analyze-audio-waveform to place markers on beatTimes or peakTimes, or to add any set of markers in a single call. analyze-audio-waveform returns file time: pass those times unchanged with timeBase 'source' and the layer playing that file, and they are converted to comp time (skipping any outside the layer's in/out).",
   {
     compIndex: z.number().int().positive().optional().describe("Project panel item index of the composition (from listCompositions compIndex). Folders and footage count too, so prefer compName. Defaults to the active comp."),
     compName: z.string().optional().describe("Composition name. Takes precedence over compIndex."),
     markerType: z.enum(["layer", "comp"]).optional().describe("'layer' (default) or 'comp' for composition-level markers."),
     layerIndex: z.number().int().positive().optional().describe("Target layer index (required for layer markers)."),
     layerName: z.string().optional().describe("Target layer name (alternative to layerIndex)."),
+    timeBase: z.enum(["comp", "source"]).optional().describe("'comp' (default): times are comp time. 'source': times are in the layer's source file (e.g. from analyze-audio-waveform); needs layerIndex or layerName, also for comp markers."),
     markers: z.array(z.object({
       timeInSeconds: z.number().describe("Time in seconds for this marker."),
       comment: z.string().optional().describe("Marker comment text."),
@@ -1574,6 +1577,180 @@ function getCacheDir(...sub: string[]): string {
   const dir = path.join(os.homedir(), "Library", "Caches", "after-effects-mcp", ...sub);
   fs.mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+// Decodes to 22.05 kHz mono 16-bit for beat tracking, cached per file version
+async function decodeMono22k(filePath: string): Promise<{ samples: Int16Array; sampleRate: number }> {
+  const stat = fs.statSync(filePath);
+  const key = `${path.basename(filePath).replace(/[^\w.-]/g, "_")}-${stat.size}-${Math.round(stat.mtimeMs)}-mono22k.wav`;
+  const wav = path.join(getCacheDir("decoded-audio"), key);
+  if (!fs.existsSync(wav)) {
+    const tmp = `${wav}.partial`;
+    await execFileAsync("afconvert", ["-f", "WAVE", "-d", "LEI16@22050", "-c", "1", filePath, tmp], { timeout: 120000 });
+    fs.renameSync(tmp, wav);
+  }
+  const buf = fs.readFileSync(wav);
+  let offset = 12;
+  while (offset < buf.length - 8) {
+    const id = buf.toString("ascii", offset, offset + 4);
+    const size = buf.readUInt32LE(offset + 4);
+    if (id === "data") {
+      const count = Math.floor(Math.min(size, buf.length - offset - 8) / 2);
+      const samples = new Int16Array(count);
+      for (let i = 0; i < count; i++) samples[i] = buf.readInt16LE(offset + 8 + i * 2);
+      return { samples, sampleRate: 22050 };
+    }
+    offset += 8 + size + (size % 2);
+  }
+  throw new Error("Decoded audio has no data chunk");
+}
+
+// In-place radix-2 FFT
+function fft(re: Float64Array, im: Float64Array): void {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      [re[i], re[j]] = [re[j], re[i]];
+      [im[i], im[j]] = [im[j], im[i]];
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = -2 * Math.PI / len;
+    const wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const ar = re[i + k + len / 2] * cr - im[i + k + len / 2] * ci;
+        const ai = re[i + k + len / 2] * ci + im[i + k + len / 2] * cr;
+        re[i + k + len / 2] = re[i + k] - ar;
+        im[i + k + len / 2] = im[i + k] - ai;
+        re[i + k] += ar;
+        im[i + k] += ai;
+        const nr = cr * wr - ci * wi;
+        ci = cr * wi + ci * wr;
+        cr = nr;
+      }
+    }
+  }
+}
+
+// Beat tracking after Ellis (2007), the method librosa uses: a spectral-flux onset envelope,
+// a tempo estimate from its autocorrelation, then dynamic programming for beats that sit on
+// strong onsets while keeping a steady period. Times are in file time.
+async function detectBeats(filePath: string): Promise<{ bpm: number; beatTimes: number[] }> {
+  const { samples, sampleRate } = await decodeMono22k(filePath);
+  const N = 1024, HOP = 256, fps = sampleRate / HOP;
+  const frames = Math.max(0, Math.floor((samples.length - N) / HOP));
+  const maxBin = Math.floor(8000 / sampleRate * N);
+  const window = new Float64Array(N).map((_, i) => 0.5 - 0.5 * Math.cos(2 * Math.PI * i / N));
+  const re = new Float64Array(N), im = new Float64Array(N);
+  let prev = new Float64Array(maxBin), cur = new Float64Array(maxBin);
+  const onset = new Float64Array(frames);
+  for (let f = 0; f < frames; f++) {
+    for (let i = 0; i < N; i++) {
+      re[i] = samples[f * HOP + i] / 32768 * window[i];
+      im[i] = 0;
+    }
+    fft(re, im);
+    let flux = 0;
+    for (let b = 1; b < maxBin; b++) {
+      cur[b] = Math.log1p(1000 * Math.hypot(re[b], im[b]));
+      if (f > 0 && cur[b] > prev[b]) flux += cur[b] - prev[b];
+    }
+    onset[f] = flux;
+    [prev, cur] = [cur, prev];
+  }
+  if (frames < fps * 4) return { bpm: 0, beatTimes: [] };
+
+  // Remove the slow trend so loud sections don't dominate, then normalize
+  const half = Math.round(fps * 0.25);
+  const env = new Float64Array(frames);
+  let sum = 0;
+  for (let i = 0; i < Math.min(frames, half); i++) sum += onset[i];
+  for (let i = 0; i < frames; i++) {
+    if (i + half < frames) sum += onset[i + half];
+    if (i - half - 1 >= 0) sum -= onset[i - half - 1];
+    const count = Math.min(frames - 1, i + half) - Math.max(0, i - half) + 1;
+    env[i] = Math.max(0, onset[i] - sum / count);
+  }
+  const std = Math.sqrt(env.reduce((a, v) => a + v * v, 0) / frames) || 1;
+  for (let i = 0; i < frames; i++) env[i] /= std;
+
+  // Tempo: autocorrelation weighted toward 120 BPM on a log scale
+  const minLag = Math.floor(fps * 60 / 200), maxLag = Math.ceil(fps * 60 / 60);
+  let bestLag = minLag, bestScore = -Infinity;
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let ac = 0;
+    for (let i = lag; i < frames; i++) ac += env[i] * env[i - lag];
+    const bpm = 60 * fps / lag;
+    const score = ac / (frames - lag) * Math.exp(-0.5 * Math.pow(Math.log2(bpm / 120), 2));
+    if (score > bestScore) { bestScore = score; bestLag = lag; }
+  }
+  const period = bestLag;
+
+  // Smooth the envelope a little around each candidate beat
+  const sigma = period / 32, radius = Math.ceil(sigma * 4);
+  const local = new Float64Array(frames);
+  for (let i = 0; i < frames; i++) {
+    let acc = 0;
+    for (let k = -radius; k <= radius; k++) {
+      const j = i + k;
+      if (j >= 0 && j < frames) acc += env[j] * Math.exp(-0.5 * (k / sigma) ** 2);
+    }
+    local[i] = acc;
+  }
+
+  const score = new Float64Array(frames), back = new Int32Array(frames).fill(-1);
+  const tightness = 100;
+  for (let t = 0; t < frames; t++) {
+    let best = 0, bestPrev = -1;
+    for (let p = t - 2 * period; p <= t - Math.round(period / 2); p++) {
+      if (p < 0) continue;
+      const v = score[p] - tightness * Math.log((t - p) / period) ** 2;
+      if (bestPrev < 0 || v > best) { best = v; bestPrev = p; }
+    }
+    score[t] = local[t] + (bestPrev >= 0 ? Math.max(0, best) : 0);
+    back[t] = bestPrev >= 0 && best > 0 ? bestPrev : -1;
+  }
+
+  let t = frames - 1;
+  for (let i = Math.max(0, frames - period); i < frames; i++) if (score[i] > score[t]) t = i;
+  const beats: number[] = [];
+  for (; t >= 0; t = back[t]) beats.push(t);
+  beats.reverse();
+
+  // Drop weak beats at the edges (silence or fades)
+  const rms = Math.sqrt(beats.reduce((a, b) => a + local[b] ** 2, 0) / Math.max(1, beats.length));
+  let lo = 0, hi = beats.length;
+  while (lo < hi && local[beats[lo]] < 0.5 * rms) lo++;
+  while (hi > lo && local[beats[hi - 1]] < 0.5 * rms) hi--;
+  const kept = beats.slice(lo, hi);
+
+  const offset = N / 2 / sampleRate;
+  const beatTimes = kept.map((f) => parseFloat((f / fps + offset).toFixed(3)));
+  const intervals = beatTimes.slice(1).map((v, i) => v - beatTimes[i]).sort((a, b) => a - b);
+  const median = intervals.length ? intervals[Math.floor(intervals.length / 2)] : period / fps;
+  return { bpm: parseFloat((60 / median).toFixed(1)), beatTimes };
+}
+
+// The waveform parser only reads PCM WAV, so anything else is decoded once with macOS's afconvert
+async function decodeToWav(filePath: string): Promise<string> {
+  if (/\.wav$/i.test(filePath)) return filePath;
+  if (process.platform !== "darwin") {
+    throw new Error("Only WAV files can be analyzed on this platform.");
+  }
+  const stat = fs.statSync(filePath);
+  const key = `${path.basename(filePath).replace(/[^\w.-]/g, "_")}-${stat.size}-${Math.round(stat.mtimeMs)}.wav`;
+  const wav = path.join(getCacheDir("decoded-audio"), key);
+  if (!fs.existsSync(wav)) {
+    const tmp = `${wav}.partial`;
+    await execFileAsync("afconvert", ["-f", "WAVE", "-d", "LEI16", filePath, tmp], { timeout: 120000 });
+    fs.renameSync(tmp, wav);
+  }
+  return wav;
 }
 
 // Compiles a bundled Swift helper on first use (or when its source changes)
