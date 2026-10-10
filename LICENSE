@@ -1,8 +1,8 @@
 MIT License
 
-Copyright (c) 2026 Axel
+Copyright (c) 2026 Axel Jönsson
 
-jsx/mcp-bridge-auto.jsx is adapted from after-effects-mcp
+The MCP server (server/) and jsx/mcp-bridge-auto.jsx are adapted from after-effects-mcp
 (https://github.com/TheLlamainator/after-effects-mcp), Copyright (c) 2025 Dakkshin,
 also under the MIT License.
 

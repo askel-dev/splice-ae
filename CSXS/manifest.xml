@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no" ?>
 <ExtensionManifest xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
 	Version="7.0"
-	ExtensionBundleId="com.axel.claudeae"
+	ExtensionBundleId="com.axel.splice"
 	ExtensionBundleVersion="1.0.0"
-	ExtensionBundleName="Claude for After Effects">
+	ExtensionBundleName="Splice">
 
 	<ExtensionList>
-		<Extension Id="com.axel.claudeae.panel" Version="1.0.0" />
-		<Extension Id="com.axel.claudeae.bridge" Version="1.0.0" />
+		<Extension Id="com.axel.splice.panel" Version="1.0.0" />
+		<Extension Id="com.axel.splice.bridge" Version="1.0.0" />
 	</ExtensionList>
 
 	<ExecutionEnvironment>
@@ -23,8 +23,8 @@
 	</ExecutionEnvironment>
 
 	<DispatchInfoList>
-		<!-- Chat panel: Window > Extensions > Claude -->
-		<Extension Id="com.axel.claudeae.panel">
+		<!-- Chat panel: Window > Extensions > Splice -->
+		<Extension Id="com.axel.splice.panel">
 			<DispatchInfo>
 				<Resources>
 					<MainPath>./panel/index.html</MainPath>
@@ -38,7 +38,7 @@
 				</Lifecycle>
 				<UI>
 					<Type>Panel</Type>
-					<Menu>Claude</Menu>
+					<Menu>Splice</Menu>
 					<Geometry>
 						<Size>
 							<Height>720</Height>
@@ -54,7 +54,7 @@
 		</Extension>
 
 		<!-- Hidden HTTP bridge for the MCP server; starts with After Effects -->
-		<Extension Id="com.axel.claudeae.bridge">
+		<Extension Id="com.axel.splice.bridge">
 			<DispatchInfo>
 				<Resources>
 					<MainPath>./bridge/index.html</MainPath>

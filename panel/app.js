@@ -20,12 +20,12 @@
 
   const store = {
     get(key, fallback) {
-      try { const v = localStorage.getItem('claudeae.' + key); return v === null ? fallback : v; } catch (e) { return fallback; }
+      try { const v = localStorage.getItem('splice.' + key); return v === null ? fallback : v; } catch (e) { return fallback; }
     },
     set(key, value) {
       try {
-        if (value === null || value === undefined) localStorage.removeItem('claudeae.' + key);
-        else localStorage.setItem('claudeae.' + key, value);
+        if (value === null || value === undefined) localStorage.removeItem('splice.' + key);
+        else localStorage.setItem('splice.' + key, value);
       } catch (e) {}
     }
   };

@@ -1,0 +1,20 @@
+{
+  "name": "splice-ae-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MCP server that lets Claude Code edit an open After Effects project through the Splice bridge",
+  "main": "build/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc && node -e \"require('fs').cpSync('src/native', 'build/native', { recursive: true })\"",
+    "start": "node build/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "~1.9.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.30",
+    "typescript": "^5.8.3"
+  }
+}
