@@ -9,6 +9,7 @@
   // Same working directory as Claude Code in the terminal at "/", so memories are shared
   const CLAUDE_CWD = '/';
   const FRAMES_DIR = path.join(os.homedir(), 'Documents', 'ae-mcp-bridge', 'frames');
+  const HISTORY_LIMIT = 300; // transcript entries shown when a chat is reopened
 
   const $ = (id) => document.getElementById(id);
   const messagesEl = $('messages');
@@ -92,19 +93,55 @@
     return node;
   }
 
-  function nearBottom() {
-    return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+  // ---------- Scrolling ----------
+  // Whether the view follows new content. Tracked from scroll events instead of measuring
+  // on every update, so streaming never forces a synchronous layout.
+  let stick = true;
+  let scrollQueued = false;
+  const jumpEl = $('jump');
+
+  // Only the user scrolling up unpins the view. Scroll events caused by resizing the panel
+  // or by content reflowing must not, or a resize would leave the chat stranded mid-history.
+  let userScrolling = false;
+  let userScrollTimer = null;
+  function userScroll() {
+    userScrolling = true;
+    clearTimeout(userScrollTimer);
+    userScrollTimer = setTimeout(() => { userScrolling = false; }, 300);
   }
+  messagesEl.addEventListener('wheel', userScroll, { passive: true });
+  messagesEl.addEventListener('keydown', userScroll);
+  messagesEl.addEventListener('mousedown', () => { userScrolling = true; });
+  window.addEventListener('mouseup', userScroll);
+
+  messagesEl.addEventListener('scroll', () => {
+    if (messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 40) stick = true;
+    else if (userScrolling) stick = false;
+    jumpEl.classList.toggle('show', !stick);
+  }, { passive: true });
 
   function scrollDown(force) {
-    if (force || nearBottom()) messagesEl.scrollTop = messagesEl.scrollHeight;
+    if (force) {
+      stick = true;
+      jumpEl.classList.remove('show');
+    }
+    if (!stick || scrollQueued) return;
+    scrollQueued = true;
+    requestAnimationFrame(() => {
+      scrollQueued = false;
+      if (stick) messagesEl.scrollTop = messagesEl.scrollHeight;
+    });
   }
 
+  jumpEl.addEventListener('click', () => scrollDown(true));
+
+  // Stay pinned to the latest message while the panel is resized or content reflows
+  new ResizeObserver(() => scrollDown()).observe(messagesEl);
+
   function append(node, force) {
-    const stick = force || nearBottom();
     $('empty').style.display = 'none';
     messagesEl.appendChild(node);
-    if (stick) messagesEl.scrollTop = messagesEl.scrollHeight;
+    scrollDown(force);
     return node;
   }
 
@@ -122,16 +159,22 @@
 
   function renderUser(text, images, hadContext, container) {
     const m = el('div', 'msg user');
+    const bubble = el('div', 'bubble');
     (images || []).forEach((src) => {
       const img = el('img');
       img.src = src;
-      m.appendChild(img);
+      bubble.appendChild(img);
     });
-    m.appendChild(document.createTextNode(text));
-    if (hadContext) m.appendChild(el('span', 'ctx', '+ selection context'));
+    if (text) bubble.appendChild(document.createTextNode(text));
+    m.appendChild(bubble);
+    if (hadContext) markContext(m);
     if (container) container.appendChild(m);
     else append(m, true);
     return m;
+  }
+
+  function markContext(m) {
+    m.appendChild(el('div', 'ctx', '<svg viewBox="0 0 16 16" width="10" height="10"><rect x="2.5" y="3.5" width="11" height="9" rx="1.5" stroke="currentColor" stroke-width="1.4" fill="none"/><path d="M2.5 6.5h11" stroke="currentColor" stroke-width="1.4"/></svg>with comp context'));
   }
 
   function toolLabel(name) {
@@ -194,6 +237,7 @@
     chip.classList.add(isError ? 'error' : 'done');
     chip.querySelector('.status').textContent = isError ? '✕' : '✓';
     if (live) {
+      setActivity('Working');
       const ms = Date.now() - chip.started;
       chip.querySelector('.time').textContent = ms < 1000 ? ms + ' ms' : (ms / 1000).toFixed(1) + ' s';
     }
@@ -204,34 +248,148 @@
   }
 
   // ---------- Streaming reply ----------
+  // The glyph steps through frames on purpose: discrete changes look the same at any frame
+  // rate, while a rotation stutters at the panel's fixed 30 fps.
+  const GLYPHS = ['·', '✢', '✳', '✶', '✻', '✽', '✻', '✶', '✳', '✢'];
+  let ticker = null;
+
   function startTurn() {
     if (turn) return turn;
     const root = el('div', 'msg assistant');
-    const working = el('div', 'working', 'Working…');
+    const foot = el('div', 'turn-foot', '<span class="glyph">✳</span><span class="label">Working…</span><span class="elapsed"></span>');
+    root.appendChild(foot);
     append(root);
-    append(working);
-    turn = { root, working, blocks: {}, streamedIds: new Set(), started: Date.now(), current: null };
+    turn = {
+      root, foot, blocks: {}, streamedIds: new Set(), started: Date.now(), activity: 'Working',
+      glyphEl: foot.querySelector('.glyph'), labelEl: foot.querySelector('.label'), elapsedEl: foot.querySelector('.elapsed')
+    };
+    startTicker();
     return turn;
+  }
+
+  // Adds content above the turn's footer line
+  function addToTurn(t, node) {
+    t.root.insertBefore(node, t.foot);
+    scrollDown();
+    return node;
+  }
+
+  function setText(node, text) {
+    if (node.textContent !== text) node.textContent = text;
+  }
+
+  function startTicker() {
+    if (ticker) return;
+    let i = 0;
+    ticker = setInterval(() => {
+      if (!turn) return stopTicker();
+      i = (i + 1) % GLYPHS.length;
+      const secs = Math.floor((Date.now() - turn.started) / 1000);
+      setText(turn.glyphEl, GLYPHS[i]);
+      setText(turn.labelEl, turn.activity + '…');
+      setText(turn.elapsedEl, secs >= 2 ? secs + 's' : '');
+    }, 120);
+  }
+
+  function stopTicker() {
+    clearInterval(ticker);
+    ticker = null;
+  }
+
+  function setActivity(text) {
+    if (turn) turn.activity = text;
   }
 
   function endTurn(meta) {
     if (!turn) return;
-    turn.working.remove();
-    if (meta) turn.root.appendChild(el('div', 'turn-meta', escapeHtml(meta)));
+    stopTicker();
+    if (meta) {
+      turn.foot.className = 'turn-foot done';
+      turn.foot.textContent = meta;
+    } else {
+      turn.foot.remove();
+    }
     turn = null;
   }
 
-  let renderQueued = new Set();
+  // Text deltas arrive in bursts while the panel draws at a fixed 30 fps. Each frame reveals a
+  // steady share of what has arrived, so replies type out smoothly instead of jumping. Finished
+  // paragraphs are rendered once; only the paragraph being written is re-rendered per frame.
+  const streaming = new Set();
+  let frameQueued = false;
+
+  function makeTextBlock() {
+    const block = { type: 'text', text: '', json: '', shown: 0, settled: 0, done: false };
+    block.el = el('div', 'text');
+    block.tail = el('div', 'tail');
+    block.el.appendChild(block.tail);
+    return block;
+  }
+
   function queueRender(block) {
-    renderQueued.add(block);
-    if (renderQueued.size === 1) {
-      requestAnimationFrame(() => {
-        const stick = nearBottom();
-        renderQueued.forEach((b) => { b.el.innerHTML = renderMarkdown(b.text); });
-        renderQueued = new Set();
-        if (stick) scrollDown(true);
-      });
+    streaming.add(block);
+    if (!frameQueued) {
+      frameQueued = true;
+      requestAnimationFrame(drawFrame);
     }
+  }
+
+  function drawFrame() {
+    frameQueued = false;
+    streaming.forEach((b) => {
+      const backlog = b.text.length - b.shown;
+      if (backlog > 0) {
+        let next = Math.min(b.text.length, b.shown + Math.max(4, Math.ceil(backlog / (b.done ? 3 : 8))));
+        const code = b.text.charCodeAt(next - 1);
+        if (code >= 0xd800 && code <= 0xdbff) next++; // don't split an emoji
+        b.shown = next;
+        paintText(b);
+      }
+      if (b.shown < b.text.length) return;
+      if (b.done) b.el.innerHTML = renderMarkdown(b.text); // one exact render of the finished block
+      streaming.delete(b);
+    });
+    scrollDown();
+    if (streaming.size && !frameQueued) {
+      frameQueued = true;
+      requestAnimationFrame(drawFrame);
+    }
+  }
+
+  function paintText(b) {
+    const visible = b.text.slice(0, b.shown);
+    const cut = settledBoundary(visible, b.settled);
+    if (cut > b.settled) {
+      b.tail.insertAdjacentHTML('beforebegin', renderMarkdown(visible.slice(b.settled, cut)));
+      b.settled = cut;
+    }
+    b.tail.innerHTML = renderMarkdown(visible.slice(b.settled));
+  }
+
+  // End of the last finished paragraph: a blank line outside a code fence that doesn't continue a list
+  function settledBoundary(text, from) {
+    let cut = from;
+    const re = /\n[ \t]*\n\s*/g;
+    re.lastIndex = from;
+    let m;
+    while ((m = re.exec(text))) {
+      const after = m.index + m[0].length;
+      if (text.length - after < 4) break;
+      if (/^([-*+]\s|\d+[.)]\s)/.test(text.slice(after, after + 8))) continue;
+      const fences = (text.slice(from, m.index).match(/^\s*(```|~~~)/gm) || []).length;
+      if (fences % 2) continue;
+      cut = after;
+    }
+    return cut;
+  }
+
+  function makeThinking() {
+    const node = el('div', 'thinking', '<div class="head"><span class="chev"></span><span class="label">Thinking…</span></div><div class="body"></div>');
+    node.querySelector('.head').addEventListener('click', () => {
+      node.classList.toggle('open');
+      if (node.classList.contains('open')) node.querySelector('.body').textContent = node.thought || '';
+    });
+    return node;
   }
 
   function handleStreamEvent(event) {
@@ -244,21 +402,21 @@
     }
     if (event.type === 'content_block_start') {
       const cb = event.content_block;
-      const block = { type: cb.type, text: '', json: '' };
+      let block = { type: cb.type, text: '', json: '' };
       if (cb.type === 'text') {
-        block.el = el('div', 'text');
-        t.root.appendChild(block.el);
+        block = makeTextBlock();
+        addToTurn(t, block.el);
+        setActivity('Working');
       } else if (cb.type === 'thinking') {
-        block.el = el('div', 'thinking', 'Thinking…<div class="body"></div>');
-        block.el.addEventListener('click', () => block.el.classList.toggle('open'));
-        t.root.appendChild(block.el);
+        block.el = addToTurn(t, makeThinking());
+        block.started = Date.now();
+        setActivity('Thinking');
       } else if (cb.type === 'tool_use' || cb.type === 'server_tool_use' || cb.type === 'mcp_tool_use') {
         block.id = cb.id;
-        block.el = makeToolChip(cb.id, cb.name, null);
-        t.root.appendChild(block.el);
+        block.el = addToTurn(t, makeToolChip(cb.id, cb.name, null));
+        setActivity('Running ' + toolLabel(cb.name).name);
       }
       t.blocks[event.index] = block;
-      scrollDown();
       return;
     }
     const block = t.blocks[event.index];
@@ -270,11 +428,20 @@
         queueRender(block);
       } else if (d.type === 'thinking_delta') {
         block.text += d.thinking;
-        block.el.querySelector('.body').textContent = block.text;
+        block.el.thought = block.text;
+        if (block.el.classList.contains('open')) block.el.querySelector('.body').textContent = block.text;
       } else if (d.type === 'input_json_delta') {
         block.json += d.partial_json;
       }
     } else if (event.type === 'content_block_stop') {
+      if (block.type === 'text') {
+        block.done = true;
+        queueRender(block);
+      } else if (block.type === 'thinking') {
+        const secs = Math.max(1, Math.round((Date.now() - block.started) / 1000));
+        block.el.querySelector('.label').textContent = 'Thought for ' + secs + 's';
+        setActivity('Working');
+      }
       if (block.id && block.json) {
         try { setToolInput(block.el, JSON.parse(block.json)); } catch (e) {}
       }
@@ -282,14 +449,14 @@
   }
 
   // A complete assistant message that wasn't streamed (or history replay)
-  function renderAssistantContent(content, container, live) {
+  function renderAssistantContent(content, container, live, before) {
     content.forEach((c) => {
       if (c.type === 'text' && c.text.trim()) {
-        container.appendChild(el('div', 'text', renderMarkdown(c.text)));
+        container.insertBefore(el('div', 'text', renderMarkdown(c.text)), before || null);
       } else if (c.type === 'tool_use') {
         const chip = makeToolChip(c.id, c.name, c.input);
         if (!live) chip.classList.remove('running');
-        container.appendChild(chip);
+        container.insertBefore(chip, before || null);
       }
     });
   }
@@ -318,7 +485,7 @@
       const t = startTurn();
       const id = msg.message && msg.message.id;
       if (!(id && t.streamedIds.has(id))) {
-        renderAssistantContent(msg.message.content || [], t.root, true);
+        renderAssistantContent(msg.message.content || [], t.root, true, t.foot);
       }
       if (msg.error === 'authentication_failed' || msg.is_api_error_message) {
         showApiError(toolResultText(msg.message.content));
@@ -358,10 +525,11 @@
     const req = message.request;
     const card = el('div', 'permission');
     const label = toolLabel(req.tool_name);
-    const startTurnIfNeeded = startTurn();
+    const t = startTurn();
 
     const resolve = (result, text) => {
       session.respondPermission(message.request_id, result);
+      setActivity('Working');
       card.classList.add('resolved');
       card.querySelectorAll('button').forEach((b) => { b.disabled = true; });
       card.querySelector('.title').textContent = text;
@@ -397,7 +565,8 @@
       deny.onclick = () => resolve({ behavior: 'deny', message: 'The user denied this in the After Effects panel.' }, 'Denied ' + label.name);
       actions.appendChild(deny);
     }
-    startTurnIfNeeded.root.appendChild(card);
+    setActivity('Waiting for you');
+    addToTurn(t, card);
     scrollDown(true);
   }
 
@@ -479,7 +648,7 @@
   function setBusy(value) {
     busy = value;
     if (!value) interrupting = false;
-    sendBtn.textContent = value ? 'Stop' : 'Send';
+    sendBtn.title = value ? 'Stop' : 'Send (Enter)';
     sendBtn.classList.toggle('stop', value);
   }
 
@@ -496,7 +665,7 @@
 
   async function send() {
     if (busy) {
-      if (session) {
+      if (session && session.isRunning()) {
         interrupting = true;
         session.interrupt();
       }
@@ -511,16 +680,18 @@
     inputEl.value = '';
     autosize();
 
+    // Show the message right away; the AE snapshot is taken while it's already on screen
+    const userEl = renderUser(text, images.map((a) => a.dataUrl), false);
+    setBusy(true);
+    startTurn();
+
     let context = null;
     if ($('send-context').checked) context = await getAEContext();
-
-    renderUser(text, images.map((a) => a.dataUrl), !!context);
+    if (context) markContext(userEl);
 
     const content = images.map((a) => ({ type: 'image', source: { type: 'base64', media_type: a.mediaType, data: a.data } }));
     content.push({ type: 'text', text: (context ? '<ae_context>\n' + context + '\n</ae_context>\n\n' : '') + (text || 'See the attached image.') });
 
-    setBusy(true);
-    startTurn();
     try {
       ensureSession().sendUser(content);
     } catch (e) {
@@ -538,6 +709,8 @@
     }
     resumeId = null;
     store.set('sessionId', null);
+    stopTicker();
+    streaming.clear();
     turn = null;
     setBusy(false);
     messagesEl.querySelectorAll(':scope > :not(#empty)').forEach((n) => n.remove());
@@ -562,6 +735,8 @@
       entries = null;
     }
     if (!entries || !entries.length) return false;
+    // Long chats only show their recent part, so the panel opens fast
+    if (entries.length > HISTORY_LIMIT) entries = entries.slice(-HISTORY_LIMIT);
     const wrap = el('div', 'history');
     let current = null;
     const results = [];
@@ -596,7 +771,8 @@
     if (!wrap.children.length) return false;
     $('empty').style.display = 'none';
     messagesEl.appendChild(wrap);
-    messagesEl.appendChild(el('div', 'history-label', 'Earlier in this chat · press + for a new one'));
+    const label = messagesEl.appendChild(el('div', 'history-label', 'Earlier in this chat'));
+    label.title = 'Press + for a new chat';
     messagesEl.scrollTop = messagesEl.scrollHeight;
     return true;
   }
@@ -665,8 +841,28 @@
   // ---------- Input ----------
   function autosize() {
     inputEl.style.height = 'auto';
-    inputEl.style.height = Math.min(inputEl.scrollHeight + 2, 180) + 'px';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 180) + 'px';
+    scrollDown();
   }
+
+  const composerBox = document.querySelector('#composer .box');
+  inputEl.addEventListener('focus', () => composerBox.classList.add('focused'));
+  inputEl.addEventListener('blur', () => composerBox.classList.remove('focused'));
+  // Clicking anywhere in the composer box puts the caret in the text field
+  composerBox.addEventListener('mousedown', (e) => {
+    if (e.target === composerBox || e.target.id === 'attachments') {
+      e.preventDefault();
+      inputEl.focus();
+    }
+  });
+
+  document.querySelectorAll('.suggestion').forEach((b) => {
+    b.addEventListener('click', () => {
+      inputEl.value = b.textContent;
+      autosize();
+      inputEl.focus();
+    });
+  });
 
   inputEl.addEventListener('input', autosize);
   inputEl.addEventListener('keydown', (e) => {

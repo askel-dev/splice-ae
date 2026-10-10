@@ -108,7 +108,8 @@
           }
         }
         var tag = ordered ? 'ol' : 'ul';
-        out.push('<' + tag + '>' + items.map(function (it) {
+        var start = ordered ? parseInt(listMatch[2], 10) : 1;
+        out.push('<' + tag + (start !== 1 ? ' start="' + start + '"' : '') + '>' + items.map(function (it) {
           var body = it.length > 1 ? render(it.join('\n')) : inline(it[0]);
           return '<li>' + body + '</li>';
         }).join('') + '</' + tag + '>');
